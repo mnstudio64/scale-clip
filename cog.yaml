@@ -1,0 +1,9 @@
+build:
+  system_packages:
+    - ffmpeg
+  python_version: "3.11"
+  python_packages:
+    - cog
+    - requests
+
+predict: "predict.py:Predictor"

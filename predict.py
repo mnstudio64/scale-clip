@@ -4,13 +4,11 @@ from pathlib import Path
 import requests
 from cog import BasePredictor, Input, Path as CogPath
 
-# ------------------ Paths ------------------
 
-FONT_DIR = Path("public/fonts")
 TEMP_DIR = Path("/tmp/clipforge")
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-BRAND_PREFIX = "luna.fun/memes/"
+FONT_DIR = Path("public/fonts")
 
 FONTS = {
     "english": FONT_DIR / "NotoSans-Bold.ttf",
@@ -24,20 +22,21 @@ FONTS = {
     "tagalog": FONT_DIR / "NotoSansTagalog-Regular.ttf",
 }
 
-# ------------------ Helpers ------------------
 
 def run(cmd):
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.returncode != 0:
         raise RuntimeError(p.stderr.decode("utf-8", errors="ignore"))
 
+
 def download(url: str, out: Path):
-    r = requests.get(url, stream=True, allow_redirects=True, timeout=40)
+    r = requests.get(url, stream=True, allow_redirects=True, timeout=60)
     r.raise_for_status()
     with out.open("wb") as f:
         for chunk in r.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 f.write(chunk)
+
 
 def detect_language(text: str):
     for ch in text:
@@ -58,7 +57,10 @@ def detect_language(text: str):
             return "bengali"
     return "english"
 
+
 def escape(text: str):
+    if not text:
+        return ""
     return (
         text.replace("\\", "\\\\")
             .replace("'", "\\'")
@@ -69,80 +71,143 @@ def escape(text: str):
             .replace("\n", "\\n")
     )
 
-# ------------------ Predictor ------------------
 
 class Predictor(BasePredictor):
     def predict(
         self,
-        video: str = Input(
-            description="Video File / URL (MP4, MOV, WebM)",
+        video_url: str = Input(
+            description="Video URL",
             default=""
         ),
-        meme_top_text: str = Input(description="Top meme text", default=""),
-        meme_bottom_text: str = Input(description="Bottom meme text", default=""),
-        meme_project_name: str = Input(description="Brand name after luna.fun/memes/", default=""),
-        include_branding: bool = Input(description="Include branding watermark", default=True),
+        top_text: str = Input(
+            description="Top text (optional)",
+            default=""
+        ),
+        bottom_text: str = Input(
+            description="Bottom text (optional)",
+            default=""
+        ),
+        brand_name: str = Input(
+            description="Brand name (optional)",
+            default=""
+        ),
+        include_branding: bool = Input(
+            description="Draw brand name at bottom-left",
+            default=True
+        ),
+        music_url: str = Input(
+            description="Music URL (optional)",
+            default=""
+        ),
+        dialogue_url: str = Input(
+            description="Dialogue URL (optional)",
+            default=""
+        ),
     ) -> CogPath:
 
-        if not video.strip():
-            raise ValueError("Video File / URL is required")
+        if not video_url.strip():
+            raise ValueError("Video URL is required")
 
         job_id = str(int(time.time()))
         work = TEMP_DIR / job_id
         work.mkdir(parents=True, exist_ok=True)
 
-        input_video = work / "input.mp4"
-        output_video = work / "output.mp4"
+        in_video = work / "input.mp4"
+        out_video = work / "output.mp4"
 
-        download(video, input_video)
+        # optional audio
+        music_path = work / "music.mp3"
+        dialogue_path = work / "dialogue.mp3"
+        has_music = bool(music_url.strip())
+        has_dialogue = bool(dialogue_url.strip())
 
-        combined_text = f"{meme_top_text} {meme_bottom_text}"
-        font = FONTS.get(detect_language(combined_text), FONTS["english"])
-        font = str(font).replace(":", "\\:")
+        download(video_url, in_video)
+        if has_music:
+            download(music_url, music_path)
+        if has_dialogue:
+            download(dialogue_url, dialogue_path)
 
+        combined_text = f"{top_text} {bottom_text} {brand_name}".strip()
+        lang = detect_language(combined_text)
+        font_path = str(FONTS.get(lang, FONTS["english"])).replace(":", "\\:")
+
+        # ---------- video filters (text overlay) ----------
         filters = []
         label = "0:v"
 
-        if meme_top_text:
+        if top_text.strip():
             filters.append(
-                f"[{label}]drawtext=fontfile='{font}':"
-                f"text='{escape(meme_top_text)}':"
+                f"[{label}]drawtext=fontfile='{font_path}':"
+                f"text='{escape(top_text)}':"
                 "fontcolor=white:fontsize=48:borderw=3:bordercolor=black:"
                 "x=(w-text_w)/2:y=40[v1]"
             )
             label = "v1"
 
-        if meme_bottom_text:
+        if bottom_text.strip():
             filters.append(
-                f"[{label}]drawtext=fontfile='{font}':"
-                f"text='{escape(meme_bottom_text)}':"
+                f"[{label}]drawtext=fontfile='{font_path}':"
+                f"text='{escape(bottom_text)}':"
                 "fontcolor=white:fontsize=48:borderw=3:bordercolor=black:"
                 "x=(w-text_w)/2:y=h-120[v2]"
             )
             label = "v2"
 
-        if include_branding:
-            brand_text = BRAND_PREFIX + meme_project_name
+        if include_branding and brand_name.strip():
             filters.append(
-                f"[{label}]drawtext=fontfile='{FONTS['english']}':"
-                f"text='{escape(brand_text)}':"
+                f"[{label}]drawtext=fontfile='{font_path}':"
+                f"text='{escape(brand_name)}':"
                 "fontcolor=white:fontsize=18:borderw=1:bordercolor=black:"
                 "x=20:y=h-40[outv]"
             )
         else:
             filters.append(f"[{label}]null[outv]")
 
-        run([
-            "ffmpeg", "-y",
-            "-i", str(input_video),
-            "-filter_complex", ";".join(filters),
-            "-map", "[outv]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",
-            "-c:a", "copy",
-            str(output_video)
-        ])
+        filter_complex = ";".join(filters)
 
-        return CogPath(str(output_video))
+        # ---------- build ffmpeg command ----------
+        cmd = ["ffmpeg", "-y", "-i", str(in_video)]
+
+        # add optional audio inputs
+        if has_dialogue:
+            cmd += ["-i", str(dialogue_path)]
+        if has_music:
+            cmd += ["-i", str(music_path)]
+
+        cmd += ["-filter_complex", filter_complex]
+
+        # audio mixing
+        if has_dialogue or has_music:
+            # Build audio mix filter: include original audio + dialogue + music if present
+            # 0:a? is original audio
+            audio_filters = []
+            audio_inputs = []
+
+            # original audio (if exists)
+            audio_inputs.append("[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a0]")
+
+            idx = 1
+            if has_dialogue:
+                audio_inputs.append(f"[{idx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a1]")
+                idx += 1
+            if has_music:
+                audio_inputs.append(f"[{idx}:a]volume=0.3,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a2]")
+
+            mix_labels = ["[a0]"]
+            if has_dialogue:
+                mix_labels.append("[a1]")
+            if has_music:
+                mix_labels.append("[a2]")
+
+            audio_filters = audio_inputs + [f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=longest:dropout_transition=0[outa]"]
+            cmd += ["-filter_complex", filter_complex + ";" + ";".join(audio_filters)]
+
+            cmd += ["-map", "[outv]", "-map", "[outa]", "-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += ["-map", "[outv]", "-map", "0:a?", "-c:a", "copy"]
+
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18", str(out_video)]
+
+        run(cmd)
+
+        return CogPath(str(out_video))
